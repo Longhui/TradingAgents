@@ -20,6 +20,10 @@ from .errors import (
     VendorRateLimitError,
 )
 from .fred import get_macro_data as get_fred_macro_data
+from .futu_vendor import (
+    get_futu_fundamentals,
+    get_futu_stock_data,
+)
 from .polymarket import get_prediction_markets as get_polymarket_prediction_markets
 from .y_finance import (
     get_balance_sheet as get_yfinance_balance_sheet,
@@ -61,6 +65,7 @@ _VENDOR_MIN_INTERVAL: dict[str, float] = {
     "alpha_vantage": 12.0,   # 5 req/min → 12 s between calls
     "fred": 0.5,
     "polymarket": 1.0,
+    "futu": 0.3,             # local FutuOpenD — near-zero latency
 }
 
 
@@ -154,6 +159,7 @@ VENDOR_LIST = [
     "fred",
     "polymarket",
     "alpha_vantage",
+    "futu",
 ]
 
 # Mapping of methods to their vendor-specific implementations
@@ -162,6 +168,7 @@ VENDOR_METHODS = {
     "get_stock_data": {
         "alpha_vantage": get_alpha_vantage_stock,
         "yfinance": get_YFin_data_online,
+        "futu": get_futu_stock_data,
     },
     # technical_indicators
     "get_indicators": {
@@ -172,6 +179,7 @@ VENDOR_METHODS = {
     "get_fundamentals": {
         "alpha_vantage": get_alpha_vantage_fundamentals,
         "yfinance": get_yfinance_fundamentals,
+        "futu": get_futu_fundamentals,
     },
     "get_balance_sheet": {
         "alpha_vantage": get_alpha_vantage_balance_sheet,

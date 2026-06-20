@@ -8,6 +8,12 @@ from tradingagents.graph.trading_graph import TradingAgentsGraph
 # want a hard-coded value that should ignore the environment.
 config = DEFAULT_CONFIG.copy()
 
+# From China: yfinance is often blocked/rate-limited. Prefer Alpha Vantage
+# as primary data source with yfinance as fallback. To restore default
+# order, change to "yfinance,alpha_vantage" or delete these lines.
+for category in ("core_stock_apis", "technical_indicators", "fundamental_data"):
+    config["data_vendors"][category] = "alpha_vantage,yfinance"
+
 # Initialize with custom config
 ta = TradingAgentsGraph(debug=True, config=config)
 

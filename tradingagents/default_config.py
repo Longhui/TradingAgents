@@ -18,7 +18,16 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_CHECKPOINT_ENABLED":   "checkpoint_enabled",
     "TRADINGAGENTS_BENCHMARK_TICKER":     "benchmark_ticker",
     "TRADINGAGENTS_TEMPERATURE":          "temperature",
+    "TRADINGAGENTS_LLM_TIMEOUT":          "llm_timeout",
+    "TRADINGAGENTS_LLM_MAX_RETRIES":      "llm_max_retries",
     "TRADINGAGENTS_VENDOR_RATE_LIMITS":   "vendor_rate_limits",
+    # Proxy for external API access (yfinance, FRED, Alpha Vantage, LLM APIs).
+    # Set TRADINGAGENTS_NO_PROXY to exclude local/Chinese services.
+    # These are also exported as real HTTP_PROXY/HTTPS_PROXY/NO_PROXY env vars
+    # so all HTTP libraries (requests, httpx, aiohttp) pick them up.
+    "TRADINGAGENTS_HTTP_PROXY":           "http_proxy",
+    "TRADINGAGENTS_HTTPS_PROXY":          "https_proxy",
+    "TRADINGAGENTS_NO_PROXY":             "no_proxy",
 }
 
 
@@ -71,6 +80,14 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # variation on models that honor it; reasoning models largely ignore it
     # and no setting makes LLM output bit-identical across runs (see README).
     "temperature": None,
+    # LLM request timeout in seconds. When set, overrides each provider's default
+    # timeout. Useful when network conditions are unreliable (e.g. proxied
+    # connections). Set via TRADINGAGENTS_LLM_TIMEOUT env var.
+    "llm_timeout": None,
+    # LLM max retries on transient failures (APIConnectionError, rate limits).
+    # The underlying SDK retries idempotent requests up to this many times
+    # with exponential backoff. Set via TRADINGAGENTS_LLM_MAX_RETRIES env var.
+    "llm_max_retries": None,
     # Checkpoint/resume: when True, LangGraph saves state after each node
     # so a crashed run can resume from the last successful step.
     "checkpoint_enabled": False,
@@ -122,8 +139,27 @@ DEFAULT_CONFIG = _apply_env_overrides({
     "vendor_rate_limits": {},
     # Tool-level configuration (takes precedence over category-level)
     "tool_vendors": {
-        # Example: "get_stock_data": "alpha_vantage",  # Override category default
+        # yfinance -> futu fallback: when yfinance hits a rate limit,
+        # the router tries FutuOpenD next for stock prices.
+        "get_stock_data": "yfinance,futu",
     },
+    # ================================================================
+    # Proxy configuration for external API access
+    # ================================================================
+    # When set, these are also exported as real HTTP_PROXY/HTTPS_PROXY/NO_PROXY
+    # env vars so every HTTP library (requests, httpx, aiohttp, ...) in the
+    # process picks them up — no per-vendor code changes needed.
+    #
+    # Typical setup:
+    #   TRADINGAGENTS_HTTP_PROXY=http://127.0.0.1:7890
+    #   TRADINGAGENTS_NO_PROXY=localhost,127.0.0.1,.local,.futunn.com,api.deepseek.com
+    #
+    # FutuOpenD connects to localhost, so it is excluded via NO_PROXY.
+    # Chinese LLM providers (DeepSeek, Qwen, MiniMax, GLM) are excluded
+    # similarly — add their API domains to NO_PROXY.
+    "http_proxy": os.getenv("TRADINGAGENTS_HTTP_PROXY"),
+    "https_proxy": os.getenv("TRADINGAGENTS_HTTPS_PROXY"),
+    "no_proxy": os.getenv("TRADINGAGENTS_NO_PROXY"),
     # Benchmark for alpha calculation in the reflection layer.
     # ``benchmark_ticker`` (when set) overrides the suffix map for all
     # tickers; leave it None to use ``benchmark_map`` for auto-detection
@@ -144,3 +180,29 @@ DEFAULT_CONFIG = _apply_env_overrides({
         "":     "SPY",         # default for US-listed tickers (no suffix)
     },
 })
+
+# -----------------------------------------------------------------------
+# Export proxy settings to real env vars so every HTTP library (requests,
+# httpx, aiohttp, yfinance, OpenAI/Anthropic SDKs, ...) picks them up
+# automatically -- no per-vendor code changes needed.
+#
+# Proxy env var naming convention:
+#   http_proxy / HTTP_PROXY     -- proxy for http:// URLs
+#   https_proxy / HTTPS_PROXY   -- proxy for https:// URLs
+#   no_proxy / NO_PROXY         -- comma-separated bypass list
+#
+# We set both the lower-case (conventional for Unix tools) and upper-case
+# (conventional for curl/wget) variants so every library is covered.
+# -----------------------------------------------------------------------
+_EXPORT_PROXY_VARS = [
+    ("http_proxy",  "http_proxy"),
+    ("http_proxy",  "HTTP_PROXY"),
+    ("https_proxy", "https_proxy"),
+    ("https_proxy", "HTTPS_PROXY"),
+    ("no_proxy",    "no_proxy"),
+    ("no_proxy",    "NO_PROXY"),
+]
+for config_key, env_var in _EXPORT_PROXY_VARS:
+    raw = DEFAULT_CONFIG.get(config_key)
+    if raw and not os.environ.get(env_var):
+        os.environ[env_var] = str(raw)

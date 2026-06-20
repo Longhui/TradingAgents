@@ -156,6 +156,19 @@ class TradingAgentsGraph:
         if temperature is not None and temperature != "":
             kwargs["temperature"] = float(temperature)
 
+        # LLM request timeout (seconds). Forward to the OpenAI SDK / httpx
+        # to avoid hanging on transient network issues.
+        llm_timeout = self.config.get("llm_timeout")
+        if llm_timeout is not None and llm_timeout != "":
+            kwargs["timeout"] = int(llm_timeout)
+
+        # LLM max retries on transient failures (APIConnectionError, 5xx).
+        # The underlying SDK retries idempotent requests up to this many
+        # times with exponential backoff.
+        llm_max_retries = self.config.get("llm_max_retries")
+        if llm_max_retries is not None and llm_max_retries != "":
+            kwargs["max_retries"] = int(llm_max_retries)
+
         return kwargs
 
     def _create_tool_nodes(self) -> dict[str, ToolNode]:
