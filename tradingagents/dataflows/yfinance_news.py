@@ -88,8 +88,9 @@ def get_news_yfinance(
     """
     article_limit = get_config()["news_article_limit"]
     try:
-        stock = yf.Ticker(ticker)
-        news = yf_retry(lambda: stock.get_news(count=article_limit))
+        news = yf_retry(
+            lambda: yf.Ticker(ticker).get_news(count=article_limit)
+        )
 
         if not news:
             return f"No news found for {ticker}"

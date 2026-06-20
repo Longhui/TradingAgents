@@ -33,4 +33,11 @@ def get_macro_indicators(
     Returns:
         str: A formatted markdown report of the macro series
     """
-    return route_to_vendor("get_macro_indicators", indicator, curr_date, look_back_days)
+    try:
+        return route_to_vendor("get_macro_indicators", indicator, curr_date, look_back_days)
+    except Exception:
+        return (
+            f"Macro indicator '{indicator}' is unavailable: FRED API key not "
+            "configured. Set FRED_API_KEY in your environment (free at "
+            "https://fred.stlouisfed.org/docs/api/api_key.html)."
+        )

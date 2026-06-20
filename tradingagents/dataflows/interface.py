@@ -1,4 +1,6 @@
 import logging
+import time
+import threading
 
 from .alpha_vantage import (
     get_balance_sheet as get_alpha_vantage_balance_sheet,
@@ -31,6 +33,76 @@ from .y_finance import (
 from .yfinance_news import get_global_news_yfinance, get_news_yfinance
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Cross-request rate limiter, shared across all vendors.
+#
+# Every call to ``route_to_vendor`` passes through the per-vendor throttle
+# before the vendor function is invoked.  This prevents any single vendor
+# from being overwhelmed by concurrent analyst agents or rapid tool calls.
+# Intervals are tuned for the vendor's documented (or observed) free-tier
+# rate limit:
+#   yfinance        ~1 req/s  (no official API, rate-limit is anti-scrape)
+#   alpha_vantage    5 req/min (free tier)
+#   fred           120 req/min
+#   polymarket      no documented limit (keyless, be conservative)
+#
+# To adjust for a paid plan, change the interval for that vendor here.
+# ---------------------------------------------------------------------------
+
+_VENDOR_THROTTLE_LOCK = threading.Lock()
+_VENDOR_LAST_CALL: dict[str, float] = {}
+_VENDOR_LOCKS: dict[str, threading.Lock] = {}
+
+# Minimum seconds between successive calls to each vendor (per-vendor gate).
+# Extend this dict when adding a new vendor to ``VENDOR_LIST``.
+_VENDOR_MIN_INTERVAL: dict[str, float] = {
+    "yfinance": 1.5,
+    "alpha_vantage": 12.0,   # 5 req/min → 12 s between calls
+    "fred": 0.5,
+    "polymarket": 1.0,
+}
+
+
+def _throttle_vendor(vendor: str) -> None:
+    """Block the caller until the minimum inter-request interval for *vendor* has elapsed.
+
+    Thread-safe: each vendor has its own lock so throttling one vendor
+    does not block calls to another.
+    """
+    min_interval = _VENDOR_MIN_INTERVAL.get(vendor, 1.0)
+
+    with _VENDOR_THROTTLE_LOCK:
+        if vendor not in _VENDOR_LOCKS:
+            _VENDOR_LOCKS[vendor] = threading.Lock()
+
+    with _VENDOR_LOCKS[vendor]:
+        now = time.monotonic()
+        elapsed = now - _VENDOR_LAST_CALL.get(vendor, 0.0)
+        if elapsed < min_interval:
+            sleep_for = min_interval - elapsed
+            logger.debug(
+                "Throttling vendor %r: sleeping %.2fs", vendor, sleep_for,
+            )
+            time.sleep(sleep_for)
+        _VENDOR_LAST_CALL[vendor] = time.monotonic()
+
+
+# --- Vendor-agnostic rate-limit config key -----------------------------------
+# ``config["vendor_rate_limits"]`` can override any entry above, e.g.:
+#   {"alpha_vantage": 0.8}   # paid plan: 75 req/min
+# The CLI or ``.env`` can supply this via ``TRADINGAGENTS_VENDOR_RATE_LIMITS``
+# as a JSON literal, e.g.  ``{"alpha_vantage": 0.8, "yfinance": 0.5}``.
+
+def _update_rate_limits_from_config() -> None:
+    """Pull vendor_rate_limits from the active config and merge them in."""
+    try:
+        overrides = get_config().get("vendor_rate_limits", {})
+        if overrides:
+            _VENDOR_MIN_INTERVAL.update(overrides)
+    except Exception:
+        pass  # config may not be available at import time
+
 
 # Tools organized by category
 TOOLS_CATEGORIES = {
@@ -190,6 +262,10 @@ def route_to_vendor(method: str, *args, **kwargs):
     for vendor in vendor_chain:
         vendor_impl = VENDOR_METHODS[method][vendor]
         impl_func = vendor_impl[0] if isinstance(vendor_impl, list) else vendor_impl
+
+        # Apply per-vendor rate throttle before every request.
+        _update_rate_limits_from_config()
+        _throttle_vendor(vendor)
 
         try:
             return impl_func(*args, **kwargs)

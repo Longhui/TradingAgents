@@ -4,11 +4,13 @@ import time
 from typing import Annotated
 
 import pandas as pd
+import requests
 import yfinance as yf
 from stockstats import wrap
 from yfinance.exceptions import YFRateLimitError
 
 from .config import get_config
+from .errors import VendorRateLimitError
 from .symbol_utils import NoMarketDataError, normalize_symbol
 from .utils import safe_ticker_component
 
@@ -19,24 +21,144 @@ logger = logging.getLogger(__name__)
 # enough to catch the year-old frames yfinance occasionally returns (#1021).
 MAX_OHLCV_STALE_DAYS = 10
 
+# ---------------------------------------------------------------------------
+# yfinance session management.
+#
+# Yahoo Finance rate-limits based on the session's cookies/tokens rather than
+# the IP alone.  Once a session is flagged, all subsequent requests through it
+# return HTTP 429 even from a clean IP.  We maintain our own session object
+# and replace it with a fresh one on first sign of rate-limiting.
+# ---------------------------------------------------------------------------
 
-def yf_retry(func, max_retries=3, base_delay=2.0):
-    """Execute a yfinance call with exponential backoff on rate limits.
+_YF_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/125.0.0.0 Safari/537.36"
+)
+
+
+def _create_yfinance_session() -> requests.Session:
+    """Create a fresh requests.Session pre-configured for Yahoo Finance.
+
+    A proper ``User-Agent`` and a warm-up request to the Yahoo homepage
+    are required to avoid the ``YFRateLimitError`` that strikes bare
+    sessions (no cookies / no crumb).
+    """
+    session = requests.Session()
+    session.headers["User-Agent"] = _YF_USER_AGENT
+    try:
+        session.get(
+            "https://finance.yahoo.com/", timeout=10,
+            headers={"User-Agent": _YF_USER_AGENT},
+        )
+    except requests.RequestException:
+        logger.debug("yfinance session warm-up failed (non-fatal)")
+    return session
+
+
+def _reset_yfinance_sessions():
+    """Replace yfinance's internal sessions with a fresh one.
+
+    yfinance 1.4.x maintains two session objects:
+    - ``yf.utils._session``   — shared by ``yf.download()``
+    - ``yf.YfData._session``  — per-Ticker internal session (class-level)
+
+    We replace the shared session and also patch ``YfData`` so new Ticker
+    instances start with a clean session.
+    """
+    from yfinance.data import YfData
+
+    fresh = _create_yfinance_session()
+
+    # Patch the shared download session.
+    yf.utils._session = fresh
+
+    # Patch the YfData class so new instances use our session instead of
+    # creating a bare one that Yahoo flags.  We only set it if the class
+    # doesn't already have a _session override we recognise.
+    if not hasattr(YfData, "_patched_session"):
+        YfData._patched_session = fresh
+        _orig_init = YfData.__init__
+
+        def _patched_init(self, *args, **kwargs):
+            _orig_init(self, *args, **kwargs)
+            # Replace the newly-created bare session with ours.
+            if hasattr(self, "_session"):
+                self._session.close()
+                self._session = requests.Session()
+                self._session.headers["User-Agent"] = _YF_USER_AGENT
+                try:
+                    self._session.get(
+                        "https://finance.yahoo.com/", timeout=10,
+                        headers={"User-Agent": _YF_USER_AGENT},
+                    )
+                except requests.RequestException:
+                    pass
+
+        YfData.__init__ = _patched_init
+
+
+# Reset yfinance internal sessions on import so every Python process starts
+# with a clean, properly configured session instead of yfinance's bare one
+# that Yahoo flags as a bot and throttles.
+_reset_yfinance_sessions()
+
+
+def yf_retry(func, max_retries=5, base_delay=2.0):
+    """Execute a yfinance call with session reset + exponential backoff.
 
     yfinance raises YFRateLimitError on HTTP 429 responses but does not
-    retry them internally. This wrapper adds retry logic specifically
-    for rate limits. Other exceptions propagate immediately.
+    retry them internally.  This wrapper:
+
+    1. On the first 429, immediately resets yfinance's internal session
+       (Yahoo rate-limits by session cookies, not just IP) and retries.
+    2. If still rate-limited, retries with exponential backoff of the form
+       ``base_delay * 2^attempt``, so the sequence is roughly
+       ``2s → 4s → 8s → 16s → 32s``, totalling ~62s before giving up.
+    3. Converts the exhausted YFRateLimitError into a ``VendorRateLimitError``
+       so the routing layer (``route_to_vendor``) treats it as "skip this
+       vendor, try the next one" rather than crashing the pipeline.
+
+    Note: the cross-request rate throttle is applied at the
+    ``route_to_vendor`` level (in ``interface.py``), not here — this function
+    only handles the per-call retry-and-backoff.
+
+    Other exceptions (network errors, invalid symbols) propagate immediately.
     """
+
+    session_reset = False
     for attempt in range(max_retries + 1):
         try:
             return func()
         except YFRateLimitError:
+            # First 429: reset yfinance's session (cookies/crumb) and retry
+            # immediately — most rate limits are session-bound, not IP-bound.
+            if not session_reset:
+                logger.warning(
+                    "Yahoo Finance rate limited; resetting session and retrying"
+                )
+                _reset_yfinance_sessions()
+                session_reset = True
+                continue  # retry right away without waiting
+
             if attempt < max_retries:
-                delay = base_delay * (2 ** attempt)
-                logger.warning(f"Yahoo Finance rate limited, retrying in {delay:.0f}s (attempt {attempt + 1}/{max_retries})")
+                delay = base_delay * (2**attempt)
+                logger.warning(
+                    "Yahoo Finance still rate limited, retrying in %ds "
+                    "(attempt %d/%d)",
+                    delay, attempt + 1, max_retries,
+                )
                 time.sleep(delay)
             else:
-                raise
+                logger.error(
+                    "Yahoo Finance still rate limited after %d retries; "
+                    "converting to VendorRateLimitError for vendor fallback",
+                    max_retries,
+                )
+                raise VendorRateLimitError(
+                    "Yahoo Finance rate-limited after "
+                    f"{max_retries + 1} attempts ({max_retries} retries)"
+                ) from None
 
 
 def _ensure_date_column(data: pd.DataFrame) -> pd.DataFrame:
@@ -58,6 +180,10 @@ def _clean_dataframe(data: pd.DataFrame) -> pd.DataFrame:
     """Normalize a stock DataFrame for stockstats: parse dates, drop invalid rows, fill price gaps."""
     data = _ensure_date_column(data)
     data["Date"] = pd.to_datetime(data["Date"], errors="coerce")
+    # Strip timezone info (yfinance returns America/New_York for US equities)
+    # so downstream comparisons with timezone-naive ``curr_date_dt`` work.
+    if data["Date"].dtype is not None and hasattr(data["Date"].dtype, "tz") and data["Date"].dtype.tz is not None:
+        data["Date"] = data["Date"].dt.tz_localize(None)
     data = data.dropna(subset=["Date"])
 
     price_cols = [c for c in ["Open", "High", "Low", "Close", "Volume"] if c in data.columns]
@@ -163,13 +289,8 @@ def load_ohlcv(symbol: str, curr_date: str) -> pd.DataFrame:
             data = cached
 
     if data is None:
-        downloaded = yf_retry(lambda: yf.download(
-            canonical,
-            start=start_str,
-            end=end_str,
-            multi_level_index=False,
-            progress=False,
-            auto_adjust=True,
+        downloaded = yf_retry(lambda: yf.Ticker(canonical).history(
+            start=start_str, end=end_str,
         ))
         downloaded = _ensure_date_column(downloaded.reset_index())
         # Only cache real data — never persist an empty frame.
@@ -177,6 +298,14 @@ def load_ohlcv(symbol: str, curr_date: str) -> pd.DataFrame:
             raise NoMarketDataError(
                 symbol, canonical, "Yahoo Finance returned no rows"
             )
+        # Strip timezone from Date before caching so the CSV is portable
+        # across environments (yfinance returns US/Eastern for domestic
+        # equities and UTC for ADRs/crypto, causing "mixed timezones" on
+        # reload).
+        if "Date" in downloaded.columns:
+            downloaded["Date"] = pd.to_datetime(
+                downloaded["Date"], errors="coerce", utc=True,
+            ).dt.tz_localize(None)
         downloaded.to_csv(data_file, index=False, encoding="utf-8")
         data = downloaded
 

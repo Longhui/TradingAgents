@@ -18,6 +18,7 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_CHECKPOINT_ENABLED":   "checkpoint_enabled",
     "TRADINGAGENTS_BENCHMARK_TICKER":     "benchmark_ticker",
     "TRADINGAGENTS_TEMPERATURE":          "temperature",
+    "TRADINGAGENTS_VENDOR_RATE_LIMITS":   "vendor_rate_limits",
 }
 
 
@@ -102,13 +103,23 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # routed to vendors you didn't choose. For ordered fallback, list several,
     # e.g. "yfinance,alpha_vantage". "default" uses all available vendors.
     "data_vendors": {
-        "core_stock_apis": "yfinance",       # Options: alpha_vantage, yfinance
-        "technical_indicators": "yfinance",  # Options: alpha_vantage, yfinance
-        "fundamental_data": "yfinance",      # Options: alpha_vantage, yfinance
-        "news_data": "yfinance",             # Options: alpha_vantage, yfinance
+        # yfinance first, Alpha Vantage as fallback when rate-limited or
+        # otherwise unavailable.  Configure as a comma-separated ordered chain
+        # — only the vendors you list are tried; "default" = all known vendors.
+        "core_stock_apis": "yfinance,alpha_vantage",
+        "technical_indicators": "yfinance,alpha_vantage",
+        "fundamental_data": "yfinance,alpha_vantage",
+        "news_data": "yfinance,alpha_vantage",
         "macro_data": "fred",                # Options: fred (needs FRED_API_KEY)
         "prediction_markets": "polymarket",  # Options: polymarket (keyless)
     },
+    # Per-vendor rate-limit overrides (seconds between successive calls).
+    # Leave empty to use the built-in defaults (tuned for free tiers).
+    # Set a shorter interval for paid plans, e.g.
+    #   {"alpha_vantage": 0.8}   # Alpha Vantage Basic: 75 req/min
+    # This can also be set via the TRADINGAGENTS_VENDOR_RATE_LIMITS env var
+    # as a JSON literal:  {"alpha_vantage": 0.8, "yfinance": 0.5}
+    "vendor_rate_limits": {},
     # Tool-level configuration (takes precedence over category-level)
     "tool_vendors": {
         # Example: "get_stock_data": "alpha_vantage",  # Override category default
