@@ -20,4 +20,11 @@ def get_verified_market_snapshot(
     price levels, Bollinger bands, RSI, MACD, moving averages, support /
     resistance, or historical comparisons, and treat it as the source of truth.
     """
-    return build_verified_market_snapshot(symbol, curr_date, look_back_days)
+    try:
+        return build_verified_market_snapshot(symbol, curr_date, look_back_days)
+    except ValueError as e:
+        return (
+            f"⚠️ Unable to build market snapshot for {symbol}: {e}\n"
+            f"Returning available data only. The symbol may not have trading "
+            f"data on or before {curr_date}."
+        )

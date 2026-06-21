@@ -2,7 +2,7 @@ from typing import Annotated
 
 from langchain_core.tools import tool
 
-from tradingagents.dataflows.interface import route_to_vendor
+from .macro_data_tools import _safe_vendor_call
 
 
 @tool
@@ -26,10 +26,5 @@ def get_indicators(
     # LLMs sometimes pass multiple indicators as a comma-separated string;
     # split and process each individually.
     indicators = [i.strip().lower() for i in indicator.split(",") if i.strip()]
-    results = []
-    for ind in indicators:
-        try:
-            results.append(route_to_vendor("get_indicators", symbol, ind, curr_date, look_back_days))
-        except ValueError as e:
-            results.append(str(e))
+    results = [_safe_vendor_call("get_indicators", symbol, ind, curr_date, look_back_days) for ind in indicators]
     return "\n\n".join(results)

@@ -4,6 +4,8 @@ from langchain_core.tools import tool
 
 from tradingagents.dataflows.interface import route_to_vendor
 
+from .macro_data_tools import _safe_vendor_call
+
 
 @tool
 def get_news(
@@ -21,7 +23,7 @@ def get_news(
     Returns:
         str: A formatted string containing news data
     """
-    return route_to_vendor("get_news", ticker, start_date, end_date)
+    return _safe_vendor_call("get_news", ticker, start_date, end_date)
 
 @tool
 def get_global_news(
@@ -43,7 +45,7 @@ def get_global_news(
     Returns:
         str: A formatted string containing global news data
     """
-    return route_to_vendor("get_global_news", curr_date, look_back_days, limit)
+    return _safe_vendor_call("get_global_news", curr_date, look_back_days, limit)
 
 @tool
 def get_insider_transactions(
@@ -57,4 +59,4 @@ def get_insider_transactions(
     Returns:
         str: A report of insider transaction data
     """
-    return route_to_vendor("get_insider_transactions", ticker)
+    return _safe_vendor_call("get_insider_transactions", ticker)

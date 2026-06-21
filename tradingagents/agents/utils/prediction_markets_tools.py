@@ -4,6 +4,8 @@ from langchain_core.tools import tool
 
 from tradingagents.dataflows.interface import route_to_vendor
 
+from .macro_data_tools import _safe_vendor_call
+
 
 @tool
 def get_prediction_markets(
@@ -28,4 +30,4 @@ def get_prediction_markets(
     Returns:
         str: A formatted markdown report of matching prediction markets
     """
-    return route_to_vendor("get_prediction_markets", topic, limit)
+    return _safe_vendor_call("get_prediction_markets", topic, limit)
