@@ -1,4 +1,5 @@
 import contextlib
+import os
 import warnings
 
 # Load .env files at package import so DEFAULT_CONFIG's env-var overlay
@@ -15,6 +16,16 @@ try:
     load_dotenv(find_dotenv(".env.enterprise", usecwd=True), override=False)
 except ImportError:
     pass
+
+# Forward TRADINGAGENTS_HTTP_PROXY / HTTPS_PROXY / NO_PROXY to the standard
+# lowercase env vars that Python's urllib and requests actually read.
+# The uppercase variants (HTTP_PROXY, HTTPS_PROXY) are intentionally NOT set
+# because urllib also reads them and, on CGI-capable hosts, the CGI spec
+# reserves the UPPERCASE form for CGI-specific semantics.
+for _var in ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"):
+    _custom = os.environ.get(f"TRADINGAGENTS_{_var}")
+    if _custom and not os.environ.get(_var.lower()):
+        os.environ[_var.lower()] = _custom
 
 # langchain-core 1.3.3 calls surface_langchain_deprecation_warnings() in
 # its own __init__, which prepends default-action filters for its

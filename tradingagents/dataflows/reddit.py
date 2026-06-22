@@ -22,6 +22,7 @@ import http.client
 import json
 import logging
 import re
+import ssl
 import time
 import xml.etree.ElementTree as ET
 from collections.abc import Iterable
@@ -29,6 +30,8 @@ from datetime import datetime
 from urllib.error import HTTPError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
+
+import certifi
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +43,7 @@ _RSS = "https://www.reddit.com/r/{sub}/search.rss?{qs}"
 # JSON search endpoint 403s, so no browser-spoofing is needed.
 _UA = "tradingagents/0.2 (+https://github.com/TauricResearch/TradingAgents)"
 _ATOM_NS = {"atom": "http://www.w3.org/2005/Atom"}
+_SSL_CTX = ssl.create_default_context(cafile=certifi.where())
 
 # Default subreddits ordered roughly by signal density for ticker-specific
 # discussion. wallstreetbets has the most volume but most noise; stocks /
@@ -105,7 +109,7 @@ def _fetch_subreddit_rss(
     url = _RSS.format(sub=sub, qs=_search_qs(ticker, limit))
     req = Request(url, headers={"User-Agent": _UA})
     try:
-        with urlopen(req, timeout=timeout) as resp:
+        with urlopen(req, timeout=timeout, context=_SSL_CTX) as resp:
             root = ET.fromstring(resp.read())
     except HTTPError as exc:
         if exc.code == 429 and _retry:
@@ -159,7 +163,7 @@ def _fetch_subreddit_json(
     url = _API.format(sub=sub, qs=_search_qs(ticker, limit))
     req = Request(url, headers={"User-Agent": _UA, "Accept": "application/json"})
     try:
-        with urlopen(req, timeout=timeout) as resp:
+        with urlopen(req, timeout=timeout, context=_SSL_CTX) as resp:
             payload = json.loads(resp.read())
         children = (payload.get("data") or {}).get("children") or []
         return [c.get("data", {}) for c in children if isinstance(c, dict)]

@@ -17,12 +17,16 @@ from __future__ import annotations
 import http.client
 import json
 import logging
+import ssl
 from urllib.request import Request, urlopen
+
+import certifi
 
 logger = logging.getLogger(__name__)
 
 _API = "https://api.stocktwits.com/api/2/streams/symbol/{ticker}.json"
 _UA = "tradingagents/0.2 (+https://github.com/TauricResearch/TradingAgents)"
+_SSL_CTX = ssl.create_default_context(cafile=certifi.where())
 
 
 def fetch_stocktwits_messages(ticker: str, limit: int = 30, timeout: float = 10.0) -> str:
@@ -36,7 +40,7 @@ def fetch_stocktwits_messages(ticker: str, limit: int = 30, timeout: float = 10.
     url = _API.format(ticker=ticker.upper())
     req = Request(url, headers={"User-Agent": _UA, "Accept": "application/json"})
     try:
-        with urlopen(req, timeout=timeout) as resp:
+        with urlopen(req, timeout=timeout, context=_SSL_CTX) as resp:
             data = json.loads(resp.read())
     except (OSError, http.client.HTTPException, json.JSONDecodeError) as exc:
         # OSError covers URLError/TimeoutError/connection resets; HTTPException
