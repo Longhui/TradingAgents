@@ -6,12 +6,18 @@ only tool available was Yahoo Finance news — which led LLMs to fabricate
 Reddit/X/StockTwits content under prompt pressure (verified live).
 
 The redesigned agent pre-fetches three complementary data sources before
-the LLM is invoked and injects them into the prompt as structured blocks:
+the LLM is invoked and injects them into the prompt as structured blocks.
+Which sources are fetched depends on the market:
 
-  1. News headlines     — Yahoo Finance (institutional framing)
-  2. StockTwits messages — retail-trader posts indexed by cashtag, with
-                           user-labeled Bullish/Bearish sentiment tags
-  3. Reddit posts        — r/wallstreetbets, r/stocks, r/investing
+  **Non-A-share (US, HK, IN, JP, etc.):**
+    1. News headlines     — Yahoo Finance (institutional framing)
+    2. StockTwits messages — retail-trader posts with user-labeled sentiment
+    3. Reddit posts        — r/wallstreetbets, r/stocks, r/investing
+
+  **A-share (.SS / .SZ):**
+    1. News headlines     — Yahoo Finance (institutional framing)
+    2. 东方财富股吧         — China's largest retail-investor stock board
+    3. 雪球                — China's leading long-form investor community
 
 The agent does not use tool-calling; the data is in the prompt from
 turn 0. Output uses the structured-output pattern (json_schema for
@@ -24,7 +30,11 @@ See: https://github.com/TauricResearch/TradingAgents/issues/557
 See: https://github.com/TauricResearch/TradingAgents/issues/796
 """
 
+from __future__ import annotations
+
+import re
 from datetime import datetime, timedelta
+from typing import Any
 
 from langchain_core.messages import AIMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
@@ -39,8 +49,18 @@ from tradingagents.agents.utils.structured import (
     bind_structured,
     invoke_structured_or_freetext,
 )
+from tradingagents.dataflows.eastmoney import fetch_eastmoney_posts
 from tradingagents.dataflows.reddit import fetch_reddit_posts
 from tradingagents.dataflows.stocktwits import fetch_stocktwits_messages
+from tradingagents.dataflows.taoguba import fetch_taoguba_posts
+
+# A-share exchange suffixes (must match the benchmark_map in default_config.py).
+_A_SHARE_SUFFIX = re.compile(r"\.(SS|SZ)$", re.IGNORECASE)
+
+
+def _is_a_share(ticker: str) -> bool:
+    """Return ``True`` when the ticker is an A-share stock (.SS or .SZ)."""
+    return bool(_A_SHARE_SUFFIX.search(ticker))
 
 
 def _seven_days_back(trade_date: str) -> str:
@@ -50,34 +70,50 @@ def _seven_days_back(trade_date: str) -> str:
 def create_sentiment_analyst(llm):
     """Create a sentiment analyst node for the trading graph.
 
-    Pre-fetches news + StockTwits + Reddit data, injects them into the
-    prompt as structured blocks, and produces a deterministic sentiment
-    report via structured output (with a free-text fallback for providers
-    that do not support it).
+    Pre-fetches news + market-appropriate social-media data, injects them
+    into the prompt as structured blocks, and produces a deterministic
+    sentiment report via structured output (with a free-text fallback for
+    providers that do not support it).
+
+    For A-share tickers (``.SS`` / ``.SZ``) the social-media sources are
+    东方财富股吧 and 雪球; for all other markets StockTwits and Reddit are
+    used instead.
     """
     structured_llm = bind_structured(llm, SentimentReport, "Sentiment Analyst")
 
-    def sentiment_analyst_node(state):
+    def sentiment_analyst_node(state: dict[str, Any]):
         ticker = state["company_of_interest"]
         end_date = state["trade_date"]
         start_date = _seven_days_back(end_date)
         instrument_context = get_instrument_context_from_state(state)
 
-        # Pre-fetch all three sources. Each fetcher degrades gracefully and
-        # returns a string (no exceptions surface from here), so the LLM
-        # always sees something — either real data or a clear placeholder.
+        # News is fetched for all markets (yfinance covers A-share news too).
         news_block = get_news.func(ticker, start_date, end_date)
-        stocktwits_block = fetch_stocktwits_messages(ticker, limit=30)
-        reddit_block = fetch_reddit_posts(ticker)
 
-        system_message = _build_system_message(
-            ticker=ticker,
-            start_date=start_date,
-            end_date=end_date,
-            news_block=news_block,
-            stocktwits_block=stocktwits_block,
-            reddit_block=reddit_block,
-        )
+        if _is_a_share(ticker):
+            # Chinese A-share data sources.
+            eastmoney_block = fetch_eastmoney_posts(ticker)
+            taoguba_block = fetch_taoguba_posts(ticker)
+            system_message = _build_a_share_system_message(
+                ticker=ticker,
+                start_date=start_date,
+                end_date=end_date,
+                news_block=news_block,
+                eastmoney_block=eastmoney_block,
+                taoguba_block=taoguba_block,
+            )
+        else:
+            # Default (US/international) data sources.
+            stocktwits_block = fetch_stocktwits_messages(ticker, limit=30)
+            reddit_block = fetch_reddit_posts(ticker)
+            system_message = _build_system_message(
+                ticker=ticker,
+                start_date=start_date,
+                end_date=end_date,
+                news_block=news_block,
+                stocktwits_block=stocktwits_block,
+                reddit_block=reddit_block,
+            )
 
         prompt = ChatPromptTemplate.from_messages(
             [
@@ -118,6 +154,11 @@ def create_sentiment_analyst(llm):
     return sentiment_analyst_node
 
 
+# ---------------------------------------------------------------------------
+# System message builders
+# ---------------------------------------------------------------------------
+
+
 def _build_system_message(
     *,
     ticker: str,
@@ -127,7 +168,7 @@ def _build_system_message(
     stocktwits_block: str,
     reddit_block: str,
 ) -> str:
-    """Assemble the sentiment-analyst system message with structured data blocks."""
+    """Assemble the sentiment-analyst system message (non-A-share / default)."""
     return f"""You are a financial market sentiment analyst. Your task is to produce a comprehensive sentiment report for {ticker} covering the period from {start_date} to {end_date}, drawing on three complementary data sources that have already been collected for you.
 
 ## Data sources (pre-fetched, in this prompt)
@@ -170,6 +211,90 @@ Community discussion. Engagement signal via upvote score and comment count. Subr
 7. **Identify catalysts and risks** that emerge across sources — news of upcoming earnings, product launches, competitive threats, macro headlines, etc.
 
 8. **Past sentiment is not predictive.** Frame your conclusions as signal for the trader to weigh alongside fundamentals and technicals, not as a price call.
+
+## Output fields
+
+Fill the following fields:
+
+- **overall_band**: Exactly one of Bullish / Mildly Bullish / Neutral / Mixed / Mildly Bearish / Bearish. Use Mixed when sources point in clearly different directions; Neutral only when all sources are genuinely silent.
+- **overall_score**: A number from 0 (maximally bearish) to 10 (maximally bullish); 5 is neutral. Keep it consistent with overall_band.
+- **confidence**: low / medium / high, based on data quality and sample size.
+- **narrative**: Full source-by-source breakdown, divergences, dominant narrative themes, catalysts and risks, and a markdown summary table of key sentiment signals (direction, source, supporting evidence).
+
+{get_language_instruction()}"""
+
+
+def _build_a_share_system_message(
+    *,
+    ticker: str,
+    start_date: str,
+    end_date: str,
+    news_block: str,
+    eastmoney_block: str,
+    taoguba_block: str,
+) -> str:
+    """Assemble the sentiment-analyst system message for A-share (.SS/.SZ) stocks."""
+    return f"""You are a financial market sentiment analyst. Your task is to produce a comprehensive sentiment report for {ticker} covering the period from {start_date} to {end_date}, drawing on three complementary data sources that have already been collected for you.
+
+{ticker} is an **A-share stock** listed on either the Shanghai Stock Exchange (.SS) or the Shenzhen Stock Exchange (.SZ). The Chinese A-share market has distinct characteristics from US markets: heavy retail participation, strong policy sensitivity, high short-term volatility, and a different news/regulatory environment.
+
+## Data sources (pre-fetched, in this prompt)
+
+### News headlines — Yahoo Finance, past 7 days
+Institutional framing. Fact-driven, slower-moving signal. Note that yfinance covers A-share stocks under their local ticker, but coverage may be less comprehensive than for US stocks.
+
+<start_of_news>
+{news_block}
+<end_of_news>
+
+### 东方财富股吧 (EastMoney Stock Board) — largest Chinese retail-investor community
+Very high activity, very emotional. This is the Chinese equivalent of StockTwits × Reddit. Each post shows a sentiment tag:
+- **Bullish / Bearish (heuristic)** — derived from the post title via keyword matching (e.g. "涨/牛/利好" → Bullish, "跌/崩/利空" → Bearish). These are ROUGH HINTS, NOT user-labeled tags. Treat them as directional indicators and read the post body for the real tone.
+- **no-label** — the heuristic could not assign a direction; read the body to judge.
+
+<start_of_eastmoney>
+{eastmoney_block}
+<end_of_eastmoney>
+
+### 淘股吧 (TaoGuBa) — short-term trader community
+Fast-moving, momentum-focused. The Chinese equivalent of /r/wallstreetbets. Users share trade ideas, daily P&L, sector rotation views, and hot stock picks. Posts are categorized as:
+- **thread** — original post (most signal)
+- **reply** — comment on another post
+- **weibo** — short broadcast
+
+<start_of_taoguba>
+{taoguba_block}
+<end_of_taoguba>
+
+## How to analyze this data (best practices for A-share sentiment)
+
+1. **Understand Chinese retail-investor language.** A-share retail investors use very direct emotional language. "牛" (bull), "涨" (up), "突破" (breakout), "利好" (good news), "起飞" (taking off) signal bullishness. "跌" (down), "崩" (collapse), "割肉" (cut losses), "利空" (bad news), "垃圾" (trash) signal bearishness. But the same posters who are exuberant one day may panic the next — treat extremes as contrarian signals.
+
+2. **东方财富 股吧 is a sentiment amplifier, not a fundamental analysis source.** Posts are short, emotional, and trend-following. A flood of bullish posts often coincides with a local top (retail buying euphoria); a flood of bearish posts may mark a bottom (retail panic selling). This "reverse indicator" dynamic is well-known among A-share traders. Use it as a **sentiment thermometer** rather than a directional signal.
+
+3. **淘股吧 reflects the short-term momentum crowd.** Pay attention to sector rotation discussions, hot stock picks (龙头股), and whether the tone is risk-on (chasing breakouts) or risk-off (cutting losses, going to cash). 淘股吧 sentiment is more leading/tactical than 股吧 — it shows what active short-term traders are thinking right now, not the broader retail base.
+
+4. **Look for cross-source divergences.** If news is neutral but 股吧 is overwhelmingly bullish and 淘股吧 is cautious about a sector rotation, the divergence between retail euphoria and trader caution is itself the signal.
+
+5. **Policy sensitivity.** A-share markets are heavily influenced by government policy, regulatory announcements, and PBOC/CSRC statements. Pay extra attention to news about interest rates, industry regulation, and government directives — these move markets more than earnings in many cases.
+
+6. **Watch for pump-and-dump / coordinated sentiment.** Chinese retail investors sometimes coordinate on social platforms to hype a stock. Unusually uniform bullish language across many posts at once, especially from new/low-follower accounts, may signal coordinated activity rather than organic sentiment.
+
+7. **Sample size and data honesty.** If one or more sources returned an "<unavailable>" placeholder, the sentiment read is less robust — flag this explicitly. The heuristic sentiment tags are directional, not definitive.
+
+8. **Identify theme clusters.** What narrative keeps appearing across 股吧 and 淘股吧? Policy change? Earnings season? Sector rotation? A thematic consensus across both communities is the strongest signal.
+
+9. **Catalysts and risks.** Flag upcoming events visible across sources — earnings, product launches, regulatory decisions, macro data releases, etc.
+
+10. **Past sentiment is not predictive.** Frame your conclusions as signal for the trader to weigh alongside fundamentals and technicals, not as a price call.
+
+## A-share market context (for your analysis)
+
+- The A-share market has a **T+1 settlement** rule (shares bought today cannot be sold until tomorrow), which affects short-term trading dynamics.
+- There is a **10% daily price limit** (±10% from previous close; ±20% for ChiNext/STAR boards) — extreme sentiment may manifest as limit-up/limit-down rather than moderate price moves.
+- The market is **retail-dominated** (retail investors account for ~60-80% of daily turnover), making sentiment indicators particularly relevant.
+- **State media** (Xinhua, CCTV, Securities Times) and official statements can rapidly shift market sentiment — news sources may carry policy signals.
+- **North-bound flows** (foreign investor access via Stock Connect) are tracked closely as a "smart money" indicator among Chinese retail traders.
 
 ## Output fields
 
